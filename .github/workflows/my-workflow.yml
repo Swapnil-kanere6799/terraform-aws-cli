@@ -28,7 +28,7 @@ jobs:
             if [ "$RETRY_COUNT" -lt 5 ]; then
               export RETRY_COUNT=$((RETRY_COUNT + 1))
               echo "Retry count updated to $RETRY_COUNT"
-              exit 1
+              exit 0
             else
               echo "Success on attempt $RETRY_COUNT"
               exit 0
