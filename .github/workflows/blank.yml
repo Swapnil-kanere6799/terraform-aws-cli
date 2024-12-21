@@ -1,0 +1,33 @@
+name: Test Retry Logic
+
+on:
+  push:
+    branches:
+      - main # Trigger when code is pushed to the main branch
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  test-retry:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Test Retry Logic
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 5
+          shell: bash
+          command: |
+            i=0
+            echo "Current iteration: $i"
+            if [ "$i" -lt 5 ]; then
+              export RETRY_COUNT=$((i + 1))
+              echo "Retry count updated to $RETRY_COUNT"
+              exit 1
+            else
+              echo "Success on attempt $i"
+              exit 0
+            fi
