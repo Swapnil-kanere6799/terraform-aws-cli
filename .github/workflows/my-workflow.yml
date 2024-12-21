@@ -3,12 +3,15 @@ name: Test Retry Logic
 on:
   push:
     branches:
-      - main # Trigger when code is pushed to the main branch
+      - main # Trigger on push to the main branch
   workflow_dispatch: # Allows manual triggering
 
 jobs:
   test-retry:
     runs-on: ubuntu-latest
+
+    env:
+      RETRY_COUNT: 0 # Initialize the retry count
 
     steps:
       - name: Checkout Code
@@ -21,14 +24,12 @@ jobs:
           max_attempts: 5
           shell: bash
           command: |
-            i=${{ env.RETRY_COUNT:-0 }}
-            echo "Current iteration: $i"
-            if [ "$i" -lt 5 ]; then
-              export RETRY_COUNT=$((i + 1))
+            echo "Current retry count: $RETRY_COUNT"
+            if [ "$RETRY_COUNT" -lt 5 ]; then
+              export RETRY_COUNT=$((RETRY_COUNT + 1))
               echo "Retry count updated to $RETRY_COUNT"
               exit 1
             else
-              echo "Success on attempt $i"
+              echo "Success on attempt $RETRY_COUNT"
               exit 0
             fi
-
