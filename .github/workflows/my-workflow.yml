@@ -21,7 +21,7 @@ jobs:
           max_attempts: 5
           shell: bash
           command: |
-            i=0
+            i=${{ env.RETRY_COUNT:-0 }}
             echo "Current iteration: $i"
             if [ "$i" -lt 5 ]; then
               export RETRY_COUNT=$((i + 1))
