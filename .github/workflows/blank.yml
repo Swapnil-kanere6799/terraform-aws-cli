@@ -1,0 +1,608 @@
+name: eventstore/Cross-Region-Multi-Account-Migration-Using-S3-Stream-Automation
+
+run-name: eventstore/Cross-region-Multi-Account-Migration-from-${{ inputs.SourceStackName }}-to-${{ inputs.DestinationStackName }}-${{ github.run_number }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      RestartDestinationEventstore:
+        type: choice
+        description: Restart Destination Eventstore
+        required: true
+        default: "False"
+        options:
+          - "True"
+          - "False"
+
+      AccountId:
+        type: string
+        description: Accounts to be migrated, Example:- 1733818752,1733818753
+        required: true
+        default: ""
+
+      JobIdentifier:
+        type: string
+        description: Job identifier
+        required: true
+        default: ""
+
+      SourceStackName:
+        type: string
+        description: Name of the source stack
+        required: true
+        default: ""
+
+      DestinationStackName:
+        type: string
+        description: Name of the destination stack
+        required: true
+        default: ""
+
+      IssueId:
+        type: string
+        required: true
+        description: Issue ID for this task
+
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+
+jobs:
+  setup-job-environment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate github token
+        id: generate-github-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.CLEVERTAP_SNE_BOT_ID }}
+          private_key: ${{ secrets.CLEVERTAP_SNE_BOT_PRIVATE_ACCESS_KEY }}
+
+      - name: Checkout Infra-Actions repo
+        uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Checkout Cloudformation repo
+        uses: actions/checkout@v3
+        with:
+          repository: CleverTap-SNE/Cloudformation
+          path: cloudformation
+          token: ${{ steps.generate-github-token.outputs.token }}
+
+      - name: Get stack prefix of source
+        id: get-source-stack-prefix
+        run: |
+          set -euxo pipefail
+          stack_prefix=$(echo "${{ inputs.SourceStackName }}" | cut -d '-' -f1)
+          echo "SOURCE_STACK_PREFIX=${stack_prefix}" >> $GITHUB_OUTPUT    
+
+      - name: Get stack prefix of destination
+        id: get-destination-stack-prefix
+        run: |
+          set -euxo pipefail
+          stack_prefix=$(echo "${{ inputs.SourceStackName }}" | cut -d '-' -f1)
+          echo "DESTINATION_STACK_PREFIX=${stack_prefix}" >> $GITHUB_OUTPUT           
+
+      - name: Get stack region of source
+        id: get-source-stack-region
+        run: |
+          set -euxo pipefail
+          region=$(./scripts/utils/get_stack_region.bash ${{ steps.get-source-stack-prefix.outputs.SOURCE_STACK_PREFIX }})
+          echo "SOURCE_REGION=${region}" >> $GITHUB_OUTPUT 
+
+      - name: Get stack region of destination
+        id: get-destination-stack-region
+        run: |
+          set -euxo pipefail
+          region=$(./scripts/utils/get_stack_region.bash ${{ steps.get-destination-stack-prefix.outputs.DESTINATION_STACK_PREFIX }})
+          echo "DESTINATION_REGION=${region}" >> $GITHUB_OUTPUT           
+
+      - name: Get stack instance count of source
+        id: get-source-stack-instance-count
+        working-directory: cloudformation
+        run: |
+          set -euxo pipefail
+          stack_prefix=${{ steps.get-source-stack-prefix.outputs.SOURCE_STACK_PREFIX }}
+          instance_count=$(jq -r '.[] | select(.Name == "${{ inputs.SourceStackName }}") | .InstanceCount' eventstore/$stack_prefix/clusters.json)
+          echo "SOURCE_INSTANCE_COUNT=$instance_count" >> $GITHUB_OUTPUT
+
+      - name: Get source stack start ip
+        id: get-source-stack-start-ip
+        working-directory: cloudformation
+        run: |
+          set -euxo pipefail
+          stack_prefix=${{ steps.get-source-stack-prefix.outputs.SOURCE_STACK_PREFIX }}
+          start_ip=$(jq -r '.[] | select(.Name == "${{ inputs.SourceStackName }}") | .StartIp' eventstore/$stack_prefix/clusters.json)
+          echo "SOURCE_START_IP=$start_ip" >> $GITHUB_OUTPUT
+
+      - name: Get stack instance count of destination
+        id: get-destination-stack-instance-count
+        working-directory: cloudformation
+        run: |
+          set -euxo pipefail
+          stack_prefix=${{ steps.get-destination-stack-prefix.outputs.DESTINATION_STACK_PREFIX }}
+          instance_count=$(jq -r '.[] | select(.Name == "${{ inputs.DestinationStackName }}") | .InstanceCount' eventstore/$stack_prefix/clusters.json)
+          echo "DESTINATION_INSTANCE_COUNT=$instance_count" >> $GITHUB_OUTPUT
+
+      - name: Get destination stack start ip
+        id: get-destination-stack-start-ip
+        working-directory: cloudformation
+        run: |
+          set -euxo pipefail
+          stack_prefix=${{ steps.get-destination-stack-prefix.outputs.DESTINATION_STACK_PREFIX }}
+          start_ip=$(jq -r '.[] | select(.Name == "${{ inputs.DestinationStackName }}") | .StartIp' eventstore/$stack_prefix/clusters.json)
+          echo "DESTINATION_START_IP=$start_ip" >> $GITHUB_OUTPUT
+
+      - name: Get status of Sensu Agent
+        id: get-status-of-sensu-agent
+        working-directory: cloudformation
+        run: |
+          set -euxo pipefail
+          is_sensu_agent_enabled_source=$(jq -r '.[] | select(.Name == "${{ inputs.SourceStackName }}") | .EnableSensuV3ClientEcsService' eventstore/${{ steps.get-source-stack-prefix.outputs.SOURCE_STACK_PREFIX }}/clusters.json)
+          is_sensu_agent_enabled_destination=$(jq -r '.[] | select(.Name == "${{ inputs.DestinationStackName }}") | .EnableSensuV3ClientEcsService' eventstore/${{ steps.get-destination-stack-prefix.outputs.STACK_PREFIX }}/clusters.json)          
+          is_sensu_agent_enabled_source=${is_sensu_agent_enabled_source:-false}
+          is_sensu_agent_enabled_destination=${is_sensu_agent_enabled_destination:-false}
+  
+          echo "IS_SENSU_AGENT_ENABLED_SOURCE=$is_sensu_agent_enabled_source" >> $GITHUB_OUTPUT
+          echo "IS_SENSU_AGENT_ENABLED_DESTINATION=$is_sensu_agent_enabled_destination" >> $GITHUB_OUTPUT
+
+      - name: Get SSM Document Names
+        id: get-ssm-documents
+        run: |
+          set -euxo pipefail
+          # Fetch all SSM document names
+          source_documents=$(aws ssm list-documents --region ${{ steps.get-source-stack-region.outputs.SOURCE_REGION }} --filters Key=Owner,Values=Self --query "DocumentIdentifiers[*].Name" --output json)
+          destination_documents=$(aws ssm list-documents --region ${{ steps.get-destination-stack-region.outputs.DESTINATION_REGION }} --filters Key=Owner,Values=Self --query "DocumentIdentifiers[*].Name" --output json)
+          # Extract each document name
+          source_document_name=$(echo "$source_documents" | jq -r '.[] | select(contains("Cross-Region-Source-Account-Migrator-MoveShardedMultiAccountUsingS3StreamAutomation"))')
+          destination_document_name=$(echo "$destination_documents" | jq -r '.[] | select(contains("Cross-Region-Destination-Account-Migrator-MoveShardedMultiAccountUsingS3StreamAutomation"))')
+          underscore_document_name=$(echo "$source_documents" | jq -r '.[] | select(contains("SsmDocument-MarkingMultipleAccountWithUnderscoreEventstoreSsmDocument"))')
+          
+          echo "SOURCE_DOCUMENT_NAME=${source_document_name}" >> $GITHUB_OUTPUT
+          echo "DESTINATION_DOCUMENT_NAME=${destination_document_name}" >> $GITHUB_OUTPUT
+          echo "UNDERSCORE_DOCUMENT_NAME=${underscore_document_name}" >> $GITHUB_OUTPUT
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    
+
+    outputs:
+      SOURCE_STACK_PREFIX: ${{ steps.get-source-stack-prefix.outputs.SOURCE_STACK_PREFIX }}
+      DESTINATION_STACK_PREFIX: ${{ steps.get-destination-stack-prefix.outputs.DESTINATION_STACK_PREFIX }}
+      SOURCE_REGION: ${{ steps.get-source-stack-region.outputs.SOURCE_REGION }}
+      DESTINATION_REGION: ${{ steps.get-destination-stack-region.outputs.DESTINATION_REGION }}
+      SOURCE_DOCUMENT_NAME: ${{ steps.get-ssm-documents.outputs.SOURCE_DOCUMENT_NAME }}
+      DESTINATION_DOCUMENT_NAME: ${{ steps.get-ssm-documents.outputs.DESTINATION_DOCUMENT_NAME }}
+      UNDERSCORE_DOCUMENT_NAME: ${{ steps.get-ssm-documents.outputs.UNDERSCORE_DOCUMENT_NAME }}
+      SOURCE_INSTANCE_COUNT: ${{ steps.get-source-stack-instance-count.outputs.SOURCE_INSTANCE_COUNT }}
+      SOURCE_START_IP: ${{ steps.get-source-stack-start-ip.outputs.SOURCE_START_IP }}
+      DESTINATION_INSTANCE_COUNT: ${{ steps.get-destination-stack-instance-count.outputs.DESTINATION_INSTANCE_COUNT }}
+      DESTINATION_START_IP: ${{ steps.get-destination-stack-start-ip.outputs.DESTINATION_START_IP }}
+      IS_SENSU_AGENT_ENABLED_SOURCE: ${{ steps.get-status-of-sensu-agent.outputs.IS_SENSU_AGENT_ENABLED_SOURCE }}
+      IS_SENSU_AGENT_ENABLED_DESTINATION: ${{ steps.get-status-of-sensu-agent.outputs.IS_SENSU_AGENT_ENABLED_DESTINATION }}
+
+
+  stop-services-of-source-cluster:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-job-environment
+    steps:
+      - name: Checkout Infra-Actions repo
+        uses: actions/checkout@v3
+
+      - name: Install Python Requirements
+        id: install-python-requirements
+        run: |
+          set -euxo pipefail
+          python3 -m venv prod-venv
+          source prod-venv/bin/activate
+          pip3 install requests argparse boto3
+
+      - name: Set Up AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.setup-job-environment.outputs.SOURCE_REGION }}
+
+      - name: Silence sensu entity
+        if: ${{ needs.setup-job-environment.outputs.IS_SENSU_AGENT_ENABLED_SOURCE == 'true' }}
+        run: |
+          set -euxo pipefail
+          python3 ./scripts/sensu/silence_sensu.py --stack ${{ inputs.SourceStackName }} --duration 14400
+        env:
+          SENSU_API_KEY: ${{ secrets.SENSU_API_KEY }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_ID: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_ID }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_SECRET }}
+
+      - name: stopping service of source cluster
+        uses: ./.github/actions/cloudformation-build-commit-and-deploy
+        with:
+          query: 'map(if .Name == "${{ inputs.SourceStackName }}" then .StopServices = true | .StopNbService = true | .EnableRealtimeExportsService = false else . end)'
+          issue_id: ${{ inputs.IssueId }}
+          stack_name: ${{ inputs.SourceStackName }}
+          component: 'eventstore'
+          commit_message: 'eventstore: stopping services of stack ${{ inputs.SourceStackName }}'
+          app_id: ${{ secrets.CLEVERTAP_SNE_BOT_ID }}
+          private_key: ${{ secrets.CLEVERTAP_SNE_BOT_PRIVATE_ACCESS_KEY }}
+          aws_cloudformation_service_iam_role: ${{ secrets.AWS_CLOUDFORMATION_SERVICE_IAM_ROLE }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Wait for services to be stopped
+        run: |
+          set -euxo pipefail
+          source prod-venv/bin/activate
+          python3 ./scripts/utils/wait-for-services-to-be-stopped.py --region ${{ needs.setup-job-environment.outputs.SOURCE_REGION }} --stack ${{ inputs.SourceStackName }} --ecs-cluster-logical-id EventstoreEcsCluster   
+
+
+  stop-services-of-destination-cluster:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-job-environment
+    steps:
+      - name: Checkout Infra-Actions repo
+        uses: actions/checkout@v3
+
+      - name: Install Python Requirements
+        id: install-python-requirements
+        run: |
+          set -euxo pipefail
+          python3 -m venv prod-venv
+          source prod-venv/bin/activate
+          pip3 install requests argparse boto3
+
+      - name: Set Up AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.setup-job-environment.outputs.DESTINATION_REGION }}
+
+      - name: Silence sensu entity
+        if: ${{ needs.setup-job-environment.outputs.IS_SENSU_AGENT_ENABLED_DESTINATION == 'true' }}
+        run: |
+          set -euxo pipefail
+          python3 ./scripts/sensu/silence_sensu.py --stack ${{ inputs.DestinationStackName }} --duration 14400
+        env:
+          SENSU_API_KEY: ${{ secrets.SENSU_API_KEY }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_ID: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_ID }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_SECRET }}
+
+      - name: stopping service of destination cluster
+        uses: ./.github/actions/cloudformation-build-commit-and-deploy
+        with:
+          query: 'map(if .Name == "${{ inputs.DestinationStackName }}" then .StopServices = true | .StopNbService = true | .EnableRealtimeExportsService = false else . end)'
+          issue_id: ${{ inputs.IssueId }}
+          stack_name: ${{ inputs.DestinationStackName }}
+          component: 'eventstore'
+          commit_message: 'eventstore: stopping services of stack ${{ inputs.DestinationStackName }}'
+          app_id: ${{ secrets.CLEVERTAP_SNE_BOT_ID }}
+          private_key: ${{ secrets.CLEVERTAP_SNE_BOT_PRIVATE_ACCESS_KEY }}
+          aws_cloudformation_service_iam_role: ${{ secrets.AWS_CLOUDFORMATION_SERVICE_IAM_ROLE }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Wait for services to be stopped
+        run: |
+          set -euxo pipefail
+          source prod-venv/bin/activate
+          python3 ./scripts/utils/wait-for-services-to-be-stopped.py --region ${{ needs.setup-job-environment.outputs.DESTINATION_REGION }} --stack ${{ inputs.DestinationStackName }} --ecs-cluster-logical-id EventstoreEcsCluster
+
+  execute-source-account-migration-automation:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-job-environment
+      - stop-services-of-source-cluster
+      - stop-services-of-destination-cluster
+    steps:
+      - name: Set Up AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.setup-job-environment.outputs.SOURCE_REGION }}
+
+      - name: Copy accounts from source to s3 via ssm automation
+        run: |
+          ExecutionId=$(aws ssm start-automation-execution \
+              --region ${{ needs.setup-job-environment.outputs.SOURCE_REGION }} \
+              --document-name "${{ needs.setup-job-environment.outputs.SOURCE_DOCUMENT_NAME }}" \
+              --parameters '{"AccountId":["${{ inputs.AccountId }}"], "SourceEventstoreStartInstanceIp":["${{ needs.setup-job-environment.outputs.SOURCE_START_IP }}"], "JobIdentifier":["${{ inputs.JobIdentifier }}"], "SourceStackName":["${{ inputs.SourceStackName }}"], "NumberOfSourceEventstoreInstances":["${{ needs.setup-job-environment.outputs.SOURCE_INSTANCE_COUNT }}"]}' \
+              --output text \
+              --query "AutomationExecutionId")
+          echo "Command Response: $ExecutionId"
+          echo "SSM Run Command Link- https://${{ needs.setup-job-environment.outputs.SOURCE_REGION }}.console.aws.amazon.com/systems-manager/automation/execution/$ExecutionId?region=${{ needs.setup-job-environment.outputs.SOURCE_REGION }}"
+
+  wait-for-copy-all-account-to-s3-and-approve-this:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-job-environment
+      - stop-services-of-source-cluster
+      - stop-services-of-destination-cluster
+      - execute-source-account-migration-automation
+    environment: wait-for-approval
+    steps:
+      - name: Got approval hence proceeding further
+        run: |
+          set -euxo pipefail
+          echo "Copied all data to s3"
+
+  execute-destination-account-migration-automation:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-job-environment
+      - stop-services-of-source-cluster
+      - stop-services-of-destination-cluster
+      - execute-source-account-migration-automation
+      - wait-for-copy-all-account-to-s3-and-approve-this
+    steps:
+      - name: Set Up AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.setup-job-environment.outputs.DESTINATION_REGION }}
+
+      - name: Copy accounts from s3 to destination via ssm automation
+        run: |
+          ExecutionId=$(aws ssm start-automation-execution \
+              --region ${{ needs.setup-job-environment.outputs.DESTINATION_REGION }} \
+              --document-name "${{ needs.setup-job-environment.outputs.DESTINATION_DOCUMENT_NAME }}" \
+              --parameters '{"restartDestinationEventstore":["${{ inputs.RestartDestinationEventstore }}"], "AccountId":["${{ inputs.AccountId }}"], "SourceEventstoreStartInstanceIp":["${{ needs.setup-job-environment.outputs.SOURCE_START_IP }}"], "DestinationEventstoreStartInstanceIp":["${{ needs.setup-job-environment.outputs.DESTINATION_START_IP }}"], "DestinationStackName":["${{ inputs.DestinationStackName }}"], "NumberOfDestinationEventstoreInstances":["${{ needs.setup-job-environment.outputs.DESTINATION_INSTANCE_COUNT }}"], "JobIdentifier":["${{ inputs.JobIdentifier }}"]}' \
+              --output text \
+              --query "AutomationExecutionId")
+          echo "Command Response: $ExecutionId"
+          echo "SSM Run Command Link- https://${{ needs.setup-job-environment.outputs.DESTINATION_REGION }}.console.aws.amazon.com/systems-manager/automation/execution/$ExecutionId?region=${{ needs.setup-job-environment.outputs.DESTINATION_REGION }}"
+
+  wait-for-copy-all-accounts-to-destination-and-approve-this:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-job-environment
+      - stop-services-of-source-cluster
+      - stop-services-of-destination-cluster
+      - execute-source-account-migration-automation
+      - wait-for-copy-all-account-to-s3-and-approve-this
+      - execute-destination-account-migration-automation
+    environment: wait-for-approval
+    steps:
+      - name: Got approval hence proceeding further
+        run: |
+          set -euxo pipefail
+          echo "Copy all data to destination"
+
+  validate-account-is-migrated-or-not:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-job-environment
+      - stop-services-of-source-cluster
+      - stop-services-of-destination-cluster
+      - execute-source-account-migration-automation
+      - wait-for-copy-all-account-to-s3-and-approve-this
+      - execute-destination-account-migration-automation
+      - wait-for-copy-all-accounts-to-destination-and-approve-this
+    steps:
+      - name: Checkout Infra-Actions repo
+        uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Install Python Requirements
+        run: |
+          set -euxo pipefail
+          python3 -m venv prod-venv
+          source prod-venv/bin/activate
+          pip3 install requests argparse boto3  
+
+      - name: Check Size of accounts- ${{ inputs.AccountId }} on source
+        id: get-source-account-size
+        run: |
+          set -euxo pipefail
+          source prod-venv/bin/activate         
+          python3 ./scripts/eventstore/check-account-size.py --region "${{ needs.setup-job-environment.outputs.SOURCE_REGION }}" --stack "${{ inputs.SourceStackName }}" --account-ids "${{ inputs.AccountId }}" > source_account_size.json
+          source_account_size=$(jq -c . source_account_size.json)
+          echo "SOURCE_ACCOUNT_SIZE=${source_account_size}" >> $GITHUB_OUTPUT 
+          python3 ./scripts/eventstore/check-account-size.py --region ${{ needs.setup-job-environment.outputs.SOURCE_REGION }} --stack ${{ inputs.SourceStackName }} --account-ids ${{ inputs.AccountId }} --is-tmp > source_tmp_account_size.json
+          source_tmp_account_size=$(jq -c . source_tmp_account_size.json)
+          echo "SOURCE_TMP_ACCOUNT_SIZE=${source_tmp_account_size}" >> $GITHUB_OUTPUT
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Check Size of account- ${{ inputs.AccountId }} on destination
+        id: get-destination-account-size
+        run: |
+          set -euxo pipefail
+          source prod-venv/bin/activate
+          python3 ./scripts/eventstore/check-account-size.py --region ${{ needs.setup-job-environment.outputs.DESTINATION_REGION }} --stack ${{ inputs.DestinationStackName }} --account-ids ${{ inputs.AccountId }} > destination_account_size.json
+          destination_account_size=$(jq -c . destination_account_size.json)
+          echo "DESTINATION_ACCOUNT_SIZE=${destination_account_size}" >> $GITHUB_OUTPUT
+          python3 ./scripts/eventstore/check-account-size.py --region ${{ needs.setup-job-environment.outputs.DESTINATION_REGION }} --stack ${{ inputs.DestinationStackName }} --account-ids ${{ inputs.AccountId }} --is-tmp > destination_tmp_account_size.json
+          destination_tmp_account_size=$(jq -c . destination_tmp_account_size.json)
+          echo "DESTINATION_TMP_ACCOUNT_SIZE=${destination_tmp_account_size}" >> $GITHUB_OUTPUT
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Check Account Is Migrated Completely
+        run: |
+          set -euxo pipefail
+          source prod-venv/bin/activate
+          echo '${{ steps.get-source-account-size.outputs.SOURCE_ACCOUNT_SIZE }}' | jq -c . > source.json
+          echo '${{ steps.get-destination-account-size.outputs.DESTINATION_ACCOUNT_SIZE }}' | jq -c . > destination.json
+          echo '${{ steps.get-source-account-size.outputs.SOURCE_TMP_ACCOUNT_SIZE }}' | jq -c . > source_tmp.json
+          echo '${{ steps.get-destination-account-size.outputs.DESTINATION_TMP_ACCOUNT_SIZE }}' | jq -c . > destination_tmp.json
+          python3 ./scripts/eventstore/compare-accounts-size.py --source source.json --destination destination.json
+          echo "Checking for tmp directory"
+          python3 ./scripts/eventstore/compare-accounts-size.py --source source_tmp.json --destination destination_tmp.json
+
+  start-services-of-source-cluster:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-job-environment
+      - stop-services-of-source-cluster
+      - stop-services-of-destination-cluster
+      - execute-source-account-migration-automation
+      - wait-for-copy-all-account-to-s3-and-approve-this
+      - execute-destination-account-migration-automation
+      - wait-for-copy-all-accounts-to-destination-and-approve-this
+      - validate-account-is-migrated-or-not
+    steps:
+      - name: Checkout Infra-Actions repo
+        uses: actions/checkout@v3
+
+      - name: Install Python Requirements
+        id: install-python-requirements
+        run: |
+          set -euxo pipefail
+          python3 -m venv prod-venv
+          source prod-venv/bin/activate
+          pip3 install requests argparse boto3        
+
+      - name: starting service of source cluster
+        uses: ./.github/actions/cloudformation-build-commit-and-deploy
+        with:
+          query: 'map(if .Name == "${{ inputs.SourceStackName }}" then .StopServices = false | .StopNbService = false | .EnableRealtimeExportsService = true else . end)'
+          issue_id: ${{ inputs.IssueId }}
+          stack_name: ${{ inputs.SourceStackName }}
+          component: 'eventstore'
+          commit_message: 'eventstore: starting services of stack for ${{ inputs.SourceStackName }}'
+          app_id: ${{ secrets.CLEVERTAP_SNE_BOT_ID }}
+          private_key: ${{ secrets.CLEVERTAP_SNE_BOT_PRIVATE_ACCESS_KEY }}
+          aws_cloudformation_service_iam_role: ${{ secrets.AWS_CLOUDFORMATION_SERVICE_IAM_ROLE }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Validate that checks associated with services are green in Sensu
+        if: ${{ needs.setup-job-environment.outputs.IS_SENSU_AGENT_ENABLED_SOURCE == 'true' }}
+        run: |
+          set -euxo pipefail
+          source prod-venv/bin/activate
+          python3 ./scripts/sensu/wait_until_sensu_checks_are_green.py --subscription eventstore --checks eventstore-availability,eventstore_health_v2,nb-availability,realtimeexports-availability --stack ${{ inputs.SourceStackName }} --start-ip ${{ needs.setup-job-environment.outputs.SOURCE_START_IP }} --instance-count ${{ needs.setup-job-environment.outputs.SOURCE_INSTANCE_COUNT }}
+        env:
+          SENSU_API_KEY: ${{ secrets.SENSU_API_KEY }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_ID: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_ID }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_SECRET }}
+
+      - name: Un-silence the instance in Sensu if its silenced
+        if: ${{ needs.setup-job-environment.outputs.IS_SENSU_AGENT_ENABLED_SOURCE == 'true' }}
+        run: |
+          set -euxo pipefail
+          source prod-venv/bin/activate
+          python3 ./scripts/sensu/clear_silence.py --host ${{ needs.setup-job-environment.outputs.SOURCE_START_IP }} --count ${{ needs.setup-job-environment.outputs.SOURCE_INSTANCE_COUNT }}
+        env:
+          SENSU_API_KEY: ${{ secrets.SENSU_API_KEY }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_ID: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_ID }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_SECRET }}
+
+  start-services-of-destination-cluster:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-job-environment
+      - stop-services-of-source-cluster
+      - stop-services-of-destination-cluster
+      - execute-source-account-migration-automation
+      - wait-for-copy-all-account-to-s3-and-approve-this
+      - execute-destination-account-migration-automation
+      - wait-for-copy-all-accounts-to-destination-and-approve-this
+      - validate-account-is-migrated-or-not
+    steps:
+      - name: Checkout Infra-Actions repo
+        uses: actions/checkout@v3
+
+      - name: Install Python Requirements
+        id: install-python-requirements
+        run: |
+          set -euxo pipefail
+          python3 -m venv prod-venv
+          source prod-venv/bin/activate
+          pip3 install requests argparse boto3        
+
+      - name: starting service of source and destination cluster
+        uses: ./.github/actions/cloudformation-build-commit-and-deploy
+        with:
+          query: 'map(if .Name == "${{ inputs.DestinationStackName }}" then .StopServices = false | .StopNbService = false | .EnableRealtimeExportsService = true else . end)'
+          issue_id: ${{ inputs.IssueId }}
+          stack_name: ${{ inputs.DestinationStackName }}
+          component: 'eventstore'
+          commit_message: 'eventstore: starting services of stack for ${{ inputs.DestinationStackName }}'
+          app_id: ${{ secrets.CLEVERTAP_SNE_BOT_ID }}
+          private_key: ${{ secrets.CLEVERTAP_SNE_BOT_PRIVATE_ACCESS_KEY }}
+          aws_cloudformation_service_iam_role: ${{ secrets.AWS_CLOUDFORMATION_SERVICE_IAM_ROLE }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Validate that checks associated with services are green in Sensu
+        if: ${{ needs.setup-job-environment.outputs.IS_SENSU_AGENT_ENABLED_DESTINATION == 'true' }}
+        run: |
+          set -euxo pipefail
+          source prod-venv/bin/activate
+          python3 ./scripts/sensu/wait_until_sensu_checks_are_green.py --subscription eventstore --checks eventstore-availability,eventstore_health_v2,nb-availability,realtimeexports-availability --stack ${{ inputs.DestinationStackName }} --start-ip ${{ needs.setup-job-environment.outputs.DESTINATION_START_IP }} --instance-count ${{ needs.setup-job-environment.outputs.DESTINATION_INSTANCE_COUNT }}
+        env:
+          SENSU_API_KEY: ${{ secrets.SENSU_API_KEY }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_ID: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_ID }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_SECRET }}
+
+      - name: Un-silence the instance in Sensu if its silenced
+        if: ${{ needs.setup-job-environment.outputs.IS_SENSU_AGENT_ENABLED_DESTINATION == 'true' }}
+        run: |
+          set -euxo pipefail
+          source prod-venv/bin/activate
+          python3 ./scripts/sensu/clear_silence.py --host ${{ needs.setup-job-environment.outputs.DESTINATION_START_IP }} --count ${{ needs.setup-job-environment.outputs.DESTINATION_INSTANCE_COUNT }}
+        env:
+          SENSU_API_KEY: ${{ secrets.SENSU_API_KEY }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_ID: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_ID }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_SECRET }}
+  execute-post-account-migration-steps:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-job-environment
+      - stop-services-of-source-cluster
+      - stop-services-of-destination-cluster
+      - execute-source-account-migration-automation
+      - wait-for-copy-all-account-to-s3-and-approve-this
+      - execute-destination-account-migration-automation
+      - wait-for-copy-all-accounts-to-destination-and-approve-this
+      - validate-account-is-migrated-or-not
+      - start-services-of-source-cluster
+      - start-services-of-destination-cluster
+    steps:
+      - name: Checkout Infra-Actions repo
+        uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Install Python Requirements
+        run: |
+          set -euxo pipefail
+          python3 -m venv prod-venv
+          source prod-venv/bin/activate
+          pip3 install requests argparse boto3
+
+      - name: Set Up AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.setup-job-environment.outputs.SOURCE_REGION }}
+
+      - name: Mark Account with Underscore on Source
+        run: |
+          command_id=$(aws ssm send-command \
+                --document-name "${{ needs.setup-job-environment.outputs.UNDERSCORE_DOCUMENT_NAME }}" \
+                --targets Key=tag:aws:cloudformation:stack-name,Values=${{ inputs.SourceStackName }} \
+                          Key=tag:role,Values=eventstore \
+                --region ${{ needs.setup-job-environment.outputs.SOURCE_REGION }} \
+                --parameters '{"accountId":["${{ inputs.AccountId }}"]}' \
+                --output text \
+                --max-errors "100%" \
+                --max-concurrency "100%" \
+                --query "Command.CommandId")
+          
+          echo "SSM Command ID: $command_id"
+          echo "SSM Run Command Link- https://${{ needs.setup-job-environment.outputs.SOURCE_REGION }}.console.aws.amazon.com/systems-manager/run-command/$command_id?region=${{ needs.setup-job-environment.outputs.SOURCE_REGION }}"
+          python3 ./scripts/eventstore/check-ssm-output.py --region "${{ needs.setup-job-environment.outputs.SOURCE_REGION }}" --command-id "$command_id" --output "false"    
+
+
+          
+          
