@@ -181,9 +181,10 @@ jobs:
       DESTINATION_START_IP: ${{ steps.get-destination-stack-start-ip.outputs.DESTINATION_START_IP }}
       ACCOUNT_IDS: ${{ steps.convert-account-id-into-json-string.outputs.ACCOUNT_IDS }}
 
-  execute-safety-check-of-migration:
+  execute-safety-check-before-migration:
     if: ${{ inputs.DisableSafetyChecks == true }}
     runs-on: ubuntu-latest
+      needs: setup-job-environment
     steps:
       - name: Generate github token
         id: generate-github-token
@@ -218,7 +219,9 @@ jobs:
 
   execute-disable-cron-jobs:
     runs-on: ubuntu-latest
-    needs: setup-job-environment
+    needs:
+      - setup-job-environment
+      - execute-safety-check-before-migration
     steps:
       - name: Checkout Infra-Actions repo
         uses: actions/checkout@v4
@@ -262,6 +265,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - setup-job-environment
+      - execute-safety-check-before-migration
       - execute-disable-cron-jobs
     environment: wait-for-approval
     steps:
@@ -274,6 +278,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - setup-job-environment
+      - execute-safety-check-before-migration
       - execute-disable-cron-jobs
       - wait-for-2-hour-and-approve-this
     steps:
@@ -343,6 +348,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - setup-job-environment
+      - execute-safety-check-before-migration
       - execute-disable-cron-jobs
       - wait-for-2-hour-and-approve-this
       - execute-stop-ingestion-and-validate-pausing-account
@@ -369,6 +375,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - setup-job-environment
+      - execute-safety-check-before-migration
       - execute-disable-cron-jobs
       - wait-for-2-hour-and-approve-this
       - execute-stop-ingestion-and-validate-pausing-account
@@ -384,6 +391,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - setup-job-environment
+      - execute-safety-check-before-migration
       - execute-disable-cron-jobs
       - wait-for-2-hour-and-approve-this
       - execute-stop-ingestion-and-validate-pausing-account
@@ -412,6 +420,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - setup-job-environment
+      - execute-safety-check-before-migration
       - execute-disable-cron-jobs
       - wait-for-2-hour-and-approve-this
       - execute-stop-ingestion-and-validate-pausing-account
@@ -429,6 +438,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - setup-job-environment
+      - execute-safety-check-before-migration
       - execute-disable-cron-jobs
       - wait-for-2-hour-and-approve-this
       - execute-stop-ingestion-and-validate-pausing-account
@@ -495,6 +505,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - setup-job-environment
+      - execute-safety-check-before-migration
       - execute-disable-cron-jobs
       - wait-for-2-hour-and-approve-this
       - execute-stop-ingestion-and-validate-pausing-account
