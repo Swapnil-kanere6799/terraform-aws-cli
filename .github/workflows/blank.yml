@@ -25,13 +25,13 @@ on:
 
       RedisStackName:
         type: string
-        description: Name of the source stack
+        description: Name of the redis stack
         required: true
         default: ""
 
       CatalogStoreStackName:
         type: string
-        description: Name of the source stack
+        description: Name of the catalogstaore stack
         required: true
         default: ""
 
@@ -44,18 +44,6 @@ on:
       DestinationRegion:
         type: string
         description: Destination stack region
-        required: true
-        default: ""
-
-      SourceStackPrefix:
-        type: string
-        description: Source stack prefix
-        required: true
-        default: ""
-
-      DestinationStackPrefix:
-        type: string
-        description: Destination stack prefix
         required: true
         default: ""
 
@@ -76,7 +64,50 @@ env:
 
 jobs:
   setup-job-environment:
-    runs-on: ${{ inputs.DestinationStackPrefix }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get stack prefix of source
+        id: get-source-stack-prefix
+        run: |
+          set -euxo pipefail
+          stack_prefix=$(echo "${{ inputs.SourceStackName }}" | cut -d '-' -f1)
+          echo "SOURCE_STACK_PREFIX=${stack_prefix}" >> $GITHUB_OUTPUT    
+
+      - name: Get stack prefix of destination
+        id: get-destination-stack-prefix
+        run: |
+          set -euxo pipefail
+          stack_prefix=$(echo "${{ inputs.DestinationStackName }}" | cut -d '-' -f1)
+          echo "DESTINATION_STACK_PREFIX=${stack_prefix}" >> $GITHUB_OUTPUT           
+          
+      - name: Get redis start ip
+        id: get-redis-start-ip
+        working-directory: cloudformation
+        run: |
+          set -euxo pipefail
+          stack_prefix=${{ steps.get-destination-stack-prefix.outputs.DESTINATION_STACK_PREFIX }}
+          start_ip=$(jq -r '.[] | select(.Name == "${{ inputs.RedisStackName }}") | .StartIp' redis/$stack_prefix/clusters.json)
+          echo "PAIR_START_IP=$start_ip" >> $GITHUB_OUTPUT
+
+      - name: Get catalogstore start ip
+        id: get-catalogstore-start-ip
+        working-directory: cloudformation
+        run: |
+          set -euxo pipefail
+          stack_prefix=${{ steps.get-destination-stack-prefix.outputs.DESTINATION_STACK_PREFIX }}
+          start_ip=$(jq -r '.[] | select(.Name == "${{ inputs.CatalogStoreStackName }}") | .StartIp' catalogstore/$stack_prefix/clusters.json)
+          echo "CS_START_IP=$start_ip" >> $GITHUB_OUTPUT          
+
+    outputs:
+      PAIR_START_IP: ${{ steps.get-redis-start-ip.outputs.PAIR_START_IP }}
+      CS_START_IP: ${{ steps.get-catalogstore-start-ip.outputs.CS_START_IP }}
+      SOURCE_STACK_PREFIX: ${{ steps.get-source-stack-prefix.outputs.SOURCE_STACK_PREFIX }}
+      DESTINATION_STACK_PREFIX: ${{ steps.get-destination-stack-prefix.outputs.DESTINATION_STACK_PREFIX }}
+      
+  fetch-necessary-cluster-ids:
+    runs-on: ${{ needs.setup-job-environment.outputs.DESTINATION_STACK_PREFIX }}
+    needs:
+      - setup-job-environment
     steps:
       - name: Generate github token
         id: generate-github-token
@@ -104,25 +135,26 @@ jobs:
           python3 -m venv prod-venv
           source prod-venv/bin/activate
           pip3 install requests argparse pymongo==4.6.3 argparse
+          
 
       - name: get primary host ip of destination
         id: get-primary-host-ip
         run: |
           set -euxo pipefail
           source prod-venv/bin/activate
-          destination_mongo_cluster_hosts=$(jq -r '.[] | select(.Name == "${{ inputs.DestinationStackPrefix }}-Mongo-MetaData-1") .Instances[] | select(.EnableEc2instance == true and .StopServices == false) .PrivateIpAddress' cloudformation/mongo/${{ inputs.DestinationStackPrefix }}/clusters.json | tr '\n' ',' | sed 's/,$//')
+          destination_mongo_cluster_hosts=$(jq -r '.[] | select(.Name == "${{ needs.setup-job-environment.outputs.DESTINATION_STACK_PREFIX }}-Mongo-MetaData-1") .Instances[] | select(.EnableEc2instance == true and .StopServices == false) .PrivateIpAddress' cloudformation/mongo/${{ needs.setup-job-environment.outputs.DESTINATION_STACK_PREFIX }}/clusters.json | tr '\n' ',' | sed 's/,$//')
           destination_primary_host=$(python3 ./scripts/mongo/get_primary_host.py --mongo-hosts $destination_mongo_cluster_hosts)
           echo "DESTINATION_PRIMARY_HOSTS=${destination_primary_host}" >> $GITHUB_OUTPUT
         env:
           MONGO_INFRA_USER: ${{ secrets.MONGO_INFRA_USER }}
           MONGO_INFRA_PASSWORD: ${{ secrets.MONGO_INFRA_PASSWORD }}
-          
+
       - name: Get redis start ip
         id: get-redis-start-ip
         working-directory: cloudformation
         run: |
           set -euxo pipefail
-          stack_prefix=${{ inputs.DestinationStackPrefix }}
+          stack_prefix=${{ needs.setup-job-environment.outputs.DESTINATION_STACK_PREFIX }}
           start_ip=$(jq -r '.[] | select(.Name == "${{ inputs.RedisStackName }}") | .StartIp' redis/$stack_prefix/clusters.json)
           echo "PAIR_START_IP=$start_ip" >> $GITHUB_OUTPUT
 
@@ -131,7 +163,7 @@ jobs:
         working-directory: cloudformation
         run: |
           set -euxo pipefail
-          stack_prefix=${{ inputs.DestinationStackPrefix }}
+          stack_prefix=${{ needs.setup-job-environment.outputs.DESTINATION_STACK_PREFIX }}
           start_ip=$(jq -r '.[] | select(.Name == "${{ inputs.CatalogStoreStackName }}") | .StartIp' catalogstore/$stack_prefix/clusters.json)
           echo "CS_START_IP=$start_ip" >> $GITHUB_OUTPUT          
 
@@ -154,10 +186,13 @@ jobs:
     outputs:
       REDIS_CLUSTER_ID: ${{ steps.get-cluster-id.outputs.REDIS_CLUSTER_ID }}
       ES_CLUSTER_ID: ${{ steps.get-cluster-id.outputs.ES_CLUSTER_ID }}
-      CS_CLUSTER_ID: ${{ steps.get-cluster-id.outputs.CS_CLUSTER_ID }}
+      CS_CLUSTER_ID: ${{ steps.get-cluster-id.outputs.CS_CLUSTER_ID }}  
 
   pre-flight-validation-via-vpc-runner:
     runs-on: eu1
+    needs:
+      - setup-job-environment
+      - fetch-necessary-cluster-ids
     steps:
       - name: Checkout Infra-Actions repo
         uses: actions/checkout@v4
@@ -196,6 +231,8 @@ jobs:
     runs-on: ${{ needs.setup-job-environment.outputs.SourceStackPrefix }}
     needs:
       - setup-job-environment
+      - fetch-necessary-cluster-ids
+      - pre-flight-validation-via-vpc-runner
     steps:
       - name: Checkout Infra-Actions repo
         uses: actions/checkout@v4
@@ -214,7 +251,7 @@ jobs:
         run: |
           set -euxo pipefail
           source prod-venv/bin/activate
-          source_mongo_cluster_hosts=$(jq -r '.[] | select(.Name == "${{ inputs.SourceStackPrefix }}-Mongo-MetaData-1") .Instances[] | select(.EnableEc2instance == true and .StopServices == false) .PrivateIpAddress' cloudformation/mongo/${{ inputs.SourceStackPrefix }}/clusters.json | tr '\n' ',' | sed 's/,$//')
+          source_mongo_cluster_hosts=$(jq -r '.[] | select(.Name == "${{ needs.setup-job-environment.outputs.SourceStackPrefix }}-Mongo-MetaData-1") .Instances[] | select(.EnableEc2instance == true and .StopServices == false) .PrivateIpAddress' cloudformation/mongo/${{ needs.setup-job-environment.outputs.SourceStackPrefix }}/clusters.json | tr '\n' ',' | sed 's/,$//')
           source_primary_host=$(python3 ./scripts/mongo/get_primary_host.py --mongo-hosts $source_mongo_cluster_hosts)
           echo "SOURCE_PRIMARY_HOSTS=${source_primary_host}" >> $GITHUB_OUTPUT
         env:
@@ -260,9 +297,9 @@ jobs:
         run: |
           set -euxo pipefail
           source prod-venv/bin/activate
-          source_region=$(echo ${{ inputs.SourceStackPrefix }} | cut -c 1-2)
-          destination_region=$(echo ${{ inputs.DestinationStackPrefix }} | cut -c 1-2)
-          python3 ./scripts/eventstore/mongo-data-migration.py --mongo-primary-ip ${{ steps.get-primary-host-ip.outputs.SOURCE_PRIMARY_HOSTS }} --task 1 --account-ids ${{ inputs.AccountId }} --source-region $source_region --destination-region $destination_region --eventstore-host ${{ needs.setup-job-environment.outputs.ES_CLUSTER_ID }} --redis-host ${{ needs.setup-job-environment.outputs.REDIS_CLUSTER_ID }} --redis-host-lp ${{ needs.setup-job-environment.outputs.REDIS_CLUSTER_ID }} --catalog-store-host ${{ needs.setup-job-environment.outputs.CS_CLUSTER_ID }}  
+          source_region=$(echo ${{ needs.setup-job-environment.outputs.SourceStackPrefix }} | cut -c 1-2)
+          destination_region=$(echo ${{ needs.setup-job-environment.outputs.DESTINATION_STACK_PREFIX }} | cut -c 1-2)
+          python3 ./scripts/eventstore/mongo-data-migration.py --mongo-primary-ip ${{ steps.get-primary-host-ip.outputs.SOURCE_PRIMARY_HOSTS }} --task 1 --account-ids ${{ inputs.AccountId }} --source-region $source_region --destination-region $destination_region --eventstore-host ${{ needs.fetch-necessary-cluster-ids.outputs.ES_CLUSTER_ID }} --redis-host ${{ needs.fetch-necessary-cluster-ids.outputs.REDIS_CLUSTER_ID }} --redis-host-lp ${{ needs.fetch-necessary-cluster-ids.outputs.REDIS_CLUSTER_ID }} --catalog-store-host ${{ needs.fetch-necessary-cluster-ids.outputs.CS_CLUSTER_ID }}  
 
       - name: Start Regional Account Migration
         run: |
