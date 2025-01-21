@@ -1,63 +1,69 @@
-name: eventstore/Mongo-Data-Migration
+name: eventstore/Start-Test-Instances
 
-run-name: eventstore/Mongo-Data-Migration-from-${{ inputs.SourceStackName }}-to-${{ inputs.DestinationStackName }}-${{ github.run_number }}
+run-name: eventstore/Start-Test-Instances-of-${{ inputs.StackName }}-${{ github.run_number }}
 
 on:
   workflow_dispatch:
     inputs:
-      AccountId:
-        type: string
-        description: Accounts to be migrated, Example:- 1733818752,1733818753
-        required: true
-        default: ""
+      StackName:
+        type: choice
+        description: Stack Name of the Eventstore Cluster
+        options:
+          - aps3-Es-Tesseract-Test-1
+          - eu1-Es-Tesseract-Test-1
+          - eu1-Es-Tesseract-Test-2
+          - eu1-Es-Tesseract-Test-3
+          - eu1-Es-Tesseract-Test-4
+          - eu1-Es-Tesseract-Test-5
+          - in1-Es-Tesseract-Test-1
+          - in1-Es-Tesseract-Test-2
+          - in1-Es-Tesseract-Test-3
+          - in1-Es-Tesseract-Test-4
+          - in1-Es-Tesseract-Test-5
+          - mec1-Es-Tesseract-Test-1
+          - sg1-Es-Tesseract-Test-1
+          - sg1-Es-Tesseract-Test-2
+          - sg1-Es-Tesseract-Test-3
+          - sk1-Es-Internal-Test-1
+          - sk1-Es-Internal-Test-12
+          - us1-Es-Test-Tesseract-1
+          - us1-Es-Test-Tesseract-2
+          - us1-Es-Test-Tesseract-3
+          - us1-Es-Tesseract-Test-1
+          - us1-Es-Tesseract-Test-2
 
-      SourceStackName:
+      IssueId:
         type: string
-        description: Name of the source stack
         required: true
-        default: ""
+        description: Issue ID for this task
 
-      DestinationStackName:
+      InstanceCount:
         type: string
-        description: Name of the destination stack
-        required: true
+        description: Number of Instances to Start
         default: ""
+        required: false
 
-      RedisStackName:
+      InstanceType:
         type: string
-        description: Name of the redis stack
-        required: true
+        description: Instance Type
         default: ""
+        required: false
 
-      CatalogStoreStackName:
+      AmiId:
         type: string
-        description: Name of the catalogstaore stack
-        required: true
+        description: AMI ID
         default: ""
+        required: false
 
-      SourceRegion:
-        type: string
-        description: Source stack region
-        required: true
-        default: ""
+      NbDiskSize:
+        type: number
+        default: 0
+        description: Nb Volume
 
-      DestinationRegion:
-        type: string
-        description: Destination stack region
-        required: true
-        default: ""
-
-      SourceStartIp:
-        type: string
-        description: Source start ip
-        required: true
-        default: ""
-
-      DestinationStartIp:
-        type: string
-        description: Destination start ip
-        required: true
-        default: ""
+      EsDiskSize:
+        type: number
+        default: 0
+        description: ES Volume
 
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
@@ -65,49 +71,7 @@ env:
 jobs:
   setup-job-environment:
     runs-on: ubuntu-latest
-    steps:
-      - name: Get stack prefix of source
-        id: get-source-stack-prefix
-        run: |
-          set -euxo pipefail
-          stack_prefix=$(echo "${{ inputs.SourceStackName }}" | cut -d '-' -f1)
-          echo "SOURCE_STACK_PREFIX=${stack_prefix}" >> $GITHUB_OUTPUT    
 
-      - name: Get stack prefix of destination
-        id: get-destination-stack-prefix
-        run: |
-          set -euxo pipefail
-          stack_prefix=$(echo "${{ inputs.DestinationStackName }}" | cut -d '-' -f1)
-          echo "DESTINATION_STACK_PREFIX=${stack_prefix}" >> $GITHUB_OUTPUT           
-          
-      - name: Get redis start ip
-        id: get-redis-start-ip
-        working-directory: cloudformation
-        run: |
-          set -euxo pipefail
-          stack_prefix=${{ steps.get-destination-stack-prefix.outputs.DESTINATION_STACK_PREFIX }}
-          start_ip=$(jq -r '.[] | select(.Name == "${{ inputs.RedisStackName }}") | .StartIp' redis/$stack_prefix/clusters.json)
-          echo "PAIR_START_IP=$start_ip" >> $GITHUB_OUTPUT
-
-      - name: Get catalogstore start ip
-        id: get-catalogstore-start-ip
-        working-directory: cloudformation
-        run: |
-          set -euxo pipefail
-          stack_prefix=${{ steps.get-destination-stack-prefix.outputs.DESTINATION_STACK_PREFIX }}
-          start_ip=$(jq -r '.[] | select(.Name == "${{ inputs.CatalogStoreStackName }}") | .StartIp' catalogstore/$stack_prefix/clusters.json)
-          echo "CS_START_IP=$start_ip" >> $GITHUB_OUTPUT          
-
-    outputs:
-      PAIR_START_IP: ${{ steps.get-redis-start-ip.outputs.PAIR_START_IP }}
-      CS_START_IP: ${{ steps.get-catalogstore-start-ip.outputs.CS_START_IP }}
-      SOURCE_STACK_PREFIX: ${{ steps.get-source-stack-prefix.outputs.SOURCE_STACK_PREFIX }}
-      DESTINATION_STACK_PREFIX: ${{ steps.get-destination-stack-prefix.outputs.DESTINATION_STACK_PREFIX }}
-      
-  fetch-necessary-cluster-ids:
-    runs-on: ${{ needs.setup-job-environment.outputs.DESTINATION_STACK_PREFIX }}
-    needs:
-      - setup-job-environment
     steps:
       - name: Generate github token
         id: generate-github-token
@@ -117,192 +81,242 @@ jobs:
           private_key: ${{ secrets.CLEVERTAP_SNE_BOT_PRIVATE_ACCESS_KEY }}
 
       - name: Checkout Infra-Actions repo
-        uses: actions/checkout@v4
-        with:
-          show-progress: false
+        uses: actions/checkout@v3
 
       - name: Checkout Cloudformation repo
-        id: checkout-cloudformation-repo
         uses: actions/checkout@v3
         with:
           repository: CleverTap-SNE/Cloudformation
           path: cloudformation
           token: ${{ steps.generate-github-token.outputs.token }}
 
-      - name: Install Python Requirements
+      - name: Get stack prefix
+        id: get-stack-prefix
         run: |
           set -euxo pipefail
-          python3 -m venv prod-venv
-          source prod-venv/bin/activate
-          pip3 install requests argparse pymongo==4.6.3 argparse
+          stack_prefix=$(echo "${{ inputs.StackName }}" | cut -d '-' -f1)
+          echo "STACK_PREFIX=${stack_prefix}" >> $GITHUB_OUTPUT
+
+      - name: Get stack region
+        id: get-stack-region
+        run: |
+          set -euxo pipefail
+          region=$(./scripts/utils/get_stack_region.bash ${{ steps.get-stack-prefix.outputs.STACK_PREFIX }})
+          echo "REGION=${region}" >> $GITHUB_OUTPUT
+
+      - name: Get stack instance count
+        id: get-stack-instance-count
+        working-directory: cloudformation
+        run: |
+          set -euxo pipefail
+          stack_prefix=${{ steps.get-stack-prefix.outputs.STACK_PREFIX }}
+          instance_count=$(jq -r '.[] | select(.Name == "${{ inputs.StackName }}") | .InstanceCount' eventstore/$stack_prefix/clusters.json)
+          echo "INSTANCE_COUNT=$instance_count" >> $GITHUB_OUTPUT
+
+      - name: Get instance type
+        id: get-instance-type
+        working-directory: cloudformation
+        run: |
+          set -euxo pipefail
+          stack_prefix=${{ steps.get-stack-prefix.outputs.STACK_PREFIX }}
+          instance_type=$(jq -r '.[] | select(.Name == "${{ inputs.StackName }}") | .InstanceType' eventstore/$stack_prefix/clusters.json)
+          echo "INSTANCE_TYPE=${instance_type}" >> $GITHUB_OUTPUT
+
+      - name: Get ami id
+        id: get-ami-id
+        working-directory: cloudformation
+        run: |
+          set -euxo pipefail
+          stack_prefix=${{ steps.get-stack-prefix.outputs.STACK_PREFIX }}
+          ami_id=$(jq -r '.[] | select(.Name == "${{ inputs.StackName }}") | .ImageId' eventstore/$stack_prefix/clusters.json)
+          echo "AMI_ID=${ami_id}" >> $GITHUB_OUTPUT
+
+      - name: Get nb volume Size
+        id: get-nb-volume-size
+        working-directory: cloudformation
+        run: |
+          set -euxo pipefail
+          stack_prefix=${{ steps.get-stack-prefix.outputs.STACK_PREFIX }}
+          nb_volume_size=$(jq -r '.[] | select(.Name == "${{ inputs.StackName }}") | .XvdnEc2VolumeSize' eventstore/$stack_prefix/clusters.json)
+          echo "NB_VOLUME_SIZE=${nb_volume_size}" >> $GITHUB_OUTPUT
+
+      - name: Get es volume Size
+        id: get-es-volume-size
+        working-directory: cloudformation
+        run: |
+          set -euxo pipefail
+          stack_prefix=${{ steps.get-stack-prefix.outputs.STACK_PREFIX }}
+          es_volume_size=$(jq -r '.[] | select(.Name == "${{ inputs.StackName }}") | .XvdpEc2VolumeSize' eventstore/$stack_prefix/clusters.json)
+          echo "ES_VOLUME_SIZE=${es_volume_size}" >> $GITHUB_OUTPUT
+
+      - name: Get status of sensu agent
+        id: get-status-of-sensu-agent
+        working-directory: cloudformation
+        run: |
+          set -euxo pipefail
+          stack_prefix=${{ steps.get-stack-prefix.outputs.STACK_PREFIX }}
+          is_sensu_agent_enabled=$(jq -r '.[] | select(.Name == "${{ inputs.StackName }}") | .EnableSensuV3ClientEcsService' eventstore/$stack_prefix/clusters.json)
+          if [ -z "$is_sensu_agent_enabled" ]; then
+            is_sensu_agent_enabled=false
+          fi
+          echo "IS_SENSU_AGENT_ENABLED=$is_sensu_agent_enabled" >> $GITHUB_OUTPUT
           
 
-      - name: get primary host ip of destination
-        id: get-primary-host-ip
-        run: |
-          set -euxo pipefail
-          source prod-venv/bin/activate
-          destination_mongo_cluster_hosts=$(jq -r '.[] | select(.Name == "${{ needs.setup-job-environment.outputs.DESTINATION_STACK_PREFIX }}-Mongo-MetaData-1") .Instances[] | select(.EnableEc2instance == true and .StopServices == false) .PrivateIpAddress' cloudformation/mongo/${{ needs.setup-job-environment.outputs.DESTINATION_STACK_PREFIX }}/clusters.json | tr '\n' ',' | sed 's/,$//')
-          destination_primary_host=$(python3 ./scripts/mongo/get_primary_host.py --mongo-hosts $destination_mongo_cluster_hosts)
-          echo "DESTINATION_PRIMARY_HOSTS=${destination_primary_host}" >> $GITHUB_OUTPUT
-        env:
-          MONGO_INFRA_USER: ${{ secrets.MONGO_INFRA_USER }}
-          MONGO_INFRA_PASSWORD: ${{ secrets.MONGO_INFRA_PASSWORD }}
-
-      - name: Get redis start ip
-        id: get-redis-start-ip
-        working-directory: cloudformation
-        run: |
-          set -euxo pipefail
-          stack_prefix=${{ needs.setup-job-environment.outputs.DESTINATION_STACK_PREFIX }}
-          start_ip=$(jq -r '.[] | select(.Name == "${{ inputs.RedisStackName }}") | .StartIp' redis/$stack_prefix/clusters.json)
-          echo "PAIR_START_IP=$start_ip" >> $GITHUB_OUTPUT
-
-      - name: Get catalogstore start ip
-        id: get-catalogstore-start-ip
-        working-directory: cloudformation
-        run: |
-          set -euxo pipefail
-          stack_prefix=${{ needs.setup-job-environment.outputs.DESTINATION_STACK_PREFIX }}
-          start_ip=$(jq -r '.[] | select(.Name == "${{ inputs.CatalogStoreStackName }}") | .StartIp' catalogstore/$stack_prefix/clusters.json)
-          echo "CS_START_IP=$start_ip" >> $GITHUB_OUTPUT          
-
-      - name: Get cluster id
-        id: get-cluster-id
-        run: |
-          set -euxo pipefail
-          python3 -m venv prod-venv
-          source prod-venv/bin/activate
-          redis_cluster_id=$(python3 ./scripts/eventstore/fetch-cluster-id.py --primary ${{ steps.get-primary-host-ip.outputs.DESTINATION_PRIMARY_HOSTS }} --host ${{ steps.get-redis-start-ip.outputs.PAIR_START_IP }}:6379 --task redis)
-          eventstore_cluster_id=$(python3 ./scripts/eventstore/fetch-cluster-id.py --primary ${{ steps.get-primary-host-ip.outputs.DESTINATION_PRIMARY_HOSTS }} --host ${{ inputs.DestinationStartIp }}:8080 --task eventstore)
-          catalogstore_cluster_id=$(python3 ./scripts/eventstore/fetch-cluster-id.py --primary ${{ steps.get-primary-host-ip.outputs.DESTINATION_PRIMARY_HOSTS }} --host ${{ inputs.CS_START_IP }} --task catalogstore)          
-          echo "REDIS_CLUSTER_ID=$redis_cluster_id" >> $GITHUB_OUTPUT
-          echo "ES_CLUSTER_ID=$eventstore_cluster_id" >> $GITHUB_OUTPUT
-          echo "CS_CLUSTER_ID=$catalogstore_cluster_id" >> $GITHUB_OUTPUT
-        env:
-          MONGO_INFRA_USER: ${{ secrets.MONGO_INFRA_USER }}
-          MONGO_INFRA_PASSWORD: ${{ secrets.MONGO_INFRA_PASSWORD }}
-
     outputs:
-      REDIS_CLUSTER_ID: ${{ steps.get-cluster-id.outputs.REDIS_CLUSTER_ID }}
-      ES_CLUSTER_ID: ${{ steps.get-cluster-id.outputs.ES_CLUSTER_ID }}
-      CS_CLUSTER_ID: ${{ steps.get-cluster-id.outputs.CS_CLUSTER_ID }}  
+      STACK_PREFIX: ${{ steps.get-stack-prefix.outputs.STACK_PREFIX }}
+      REGION: ${{ steps.get-stack-region.outputs.REGION }}
+      INSTANCE_COUNT: ${{ steps.get-stack-instance-count.outputs.INSTANCE_COUNT }}
+      INSTANCE_TYPE: ${{ steps.get-instance-type.outputs.INSTANCE_TYPE }}
+      AMI_ID: ${{ steps.get-ami-id.outputs.AMI_ID }}
+      NB_VOLUME_SIZE: ${{steps.get-nb-volume-size.outputs.NB_VOLUME_SIZE}}
+      ES_VOLUME_SIZE: ${{steps.get-es-volume-size.outputs.ES_VOLUME_SIZE}}
+      IS_SENSU_AGENT_ENABLED: ${{ steps.get-status-of-sensu-agent.outputs.IS_SENSU_AGENT_ENABLED }}
 
-  pre-flight-validation-via-vpc-runner:
-    runs-on: eu1
+  pre-flight-validation:
+    runs-on: ubuntu-latest
     needs:
       - setup-job-environment
-      - fetch-necessary-cluster-ids
+
     steps:
-      - name: Checkout Infra-Actions repo
-        uses: actions/checkout@v4
+      - name: Generate github token
+        id: generate-github-token
+        uses: tibdex/github-app-token@v1.8.0
         with:
-          show-progress: false
+          app_id: ${{ secrets.CLEVERTAP_SNE_BOT_ID }}
+          private_key: ${{ secrets.CLEVERTAP_SNE_BOT_PRIVATE_ACCESS_KEY }}
 
-      - name: Install Python Requirements
-        run: |
-          set -euxo pipefail
-          python3 -m venv prod-venv
-          source prod-venv/bin/activate
-          pip3 install requests argparse pymongo==4.6.3 argparse
-
-      - name: get primary host ip
-        id: get-primary-host-ip
-        run: |
-          set -euxo pipefail
-          source prod-venv/bin/activate
-          mongo_cluster_hosts=$(jq -r '.[] | select(.Name == "eu1-Mongo-MetaData-1") .Instances[] | select(.EnableEc2instance == true and .StopServices == false) .PrivateIpAddress' cloudformation/mongo/eu1/clusters.json | tr '\n' ',' | sed 's/,$//')
-          primary_host=$(python3 ./scripts/mongo/get_primary_host.py --mongo-hosts $mongo_cluster_hosts)
-          echo "PRIMARY_HOSTS=${primary_host}" >> $GITHUB_OUTPUT
-        env:
-          MONGO_INFRA_USER: ${{ secrets.MONGO_INFRA_USER }}
-          MONGO_INFRA_PASSWORD: ${{ secrets.MONGO_INFRA_PASSWORD }}
-
-      - name: Check account entry is present in eu1
-        run: |
-          set -euxo pipefail
-          source prod-venv/bin/activate
-          python3 ./scripts/eventstore/mongo-data-migration.py --mongo-primary-ip ${{ steps.get-primary-host-ip.outputs.PRIMARY_HOSTS }} --task "2" --account-ids ${{ inputs.AccountId }}
-        env:
-          MONGO_INFRA_USER: ${{ secrets.MONGO_INFRA_USER }}
-          MONGO_INFRA_PASSWORD: ${{ secrets.MONGO_INFRA_PASSWORD }}
-
-  start-mongo-data-migration:
-    runs-on: ${{ needs.setup-job-environment.outputs.SourceStackPrefix }}
-    needs:
-      - setup-job-environment
-      - fetch-necessary-cluster-ids
-      - pre-flight-validation-via-vpc-runner
-    steps:
-      - name: Checkout Infra-Actions repo
-        uses: actions/checkout@v4
+      - name: Checkout Cloudformation repo
+        uses: actions/checkout@v3
         with:
-          show-progress: false
+          repository: CleverTap-SNE/Cloudformation
+          path: cloudformation
+          token: ${{ steps.generate-github-token.outputs.token }}
 
-      - name: Install Python Requirements
+      - name: Validate if the volumes are false and the instances are not running
+        working-directory: cloudformation
         run: |
           set -euxo pipefail
-          python3 -m venv prod-venv
-          source prod-venv/bin/activate
-          pip3 install requests argparse pymongo==4.6.3 argparse
-
-      - name: get primary host ip
-        id: get-primary-host-ip
-        run: |
-          set -euxo pipefail
-          source prod-venv/bin/activate
-          source_mongo_cluster_hosts=$(jq -r '.[] | select(.Name == "${{ needs.setup-job-environment.outputs.SourceStackPrefix }}-Mongo-MetaData-1") .Instances[] | select(.EnableEc2instance == true and .StopServices == false) .PrivateIpAddress' cloudformation/mongo/${{ needs.setup-job-environment.outputs.SourceStackPrefix }}/clusters.json | tr '\n' ',' | sed 's/,$//')
-          source_primary_host=$(python3 ./scripts/mongo/get_primary_host.py --mongo-hosts $source_mongo_cluster_hosts)
-          echo "SOURCE_PRIMARY_HOSTS=${source_primary_host}" >> $GITHUB_OUTPUT
-        env:
-          MONGO_INFRA_USER: ${{ secrets.MONGO_INFRA_USER }}
-          MONGO_INFRA_PASSWORD: ${{ secrets.MONGO_INFRA_PASSWORD }}
-
-      - name: Get cluster ids
-        id: get-cluster-ids
-        run: |
-          set -euxo pipefail
-          source prod-venv/bin/activate
-          source_cluster_id=$(python3 ./scripts/eventstore/fetch-cluster-id.py --primary ${{ steps.get-primary-host-ip.outputs.SOURCE_PRIMARY_HOSTS }} --host ${{ inputs.SourceStartIp }}:8080 --task eventstore)
-          echo "SOURCE_CLUSTER_ID=${source_cluster_id}" >> $GITHUB_OUTPUT
-        env:
-          MONGO_INFRA_USER: ${{ secrets.MONGO_INFRA_USER }}
-          MONGO_INFRA_PASSWORD: ${{ secrets.MONGO_INFRA_PASSWORD }}
-
-      - name: Get es host for accounts ${{ inputs.AccountId }}
-        id: get-current-cluster-id
-        run: |
-          set -euxo pipefail
-          source prod-venv/bin/activate
-          current_entry=$(python3 ./scripts/eventstore/check-mongo-entry.py --primary ${{ steps.get-primary-host-ip.outputs.SOURCE_PRIMARY_HOSTS }} --ids ${{ inputs.AccountId }})
-          echo "CURRENT_CLUSTER_ID=${current_entry}" >> $GITHUB_OUTPUT
-        env:
-          MONGO_INFRA_USER: ${{ secrets.MONGO_INFRA_USER }}
-          MONGO_INFRA_PASSWORD: ${{ secrets.MONGO_INFRA_PASSWORD }}
-
-      - name: Compare es host source with account es host
-        run: |
-          set -euxo pipefail
-          source prod-venv/bin/activate
-          var1="${{ steps.get-current-cluster-id.outputs.CURRENT_CLUSTER_ID }}"
-          var2=""${{ steps.get-cluster-ids.outputs.SOURCE_CLUSTER_ID }}""
-          if [ "$var1" == "$var2" ]; then
-            echo "Current es host value matches with account es host."
+          stack_prefix=${{ needs.setup-job-environment.outputs.STACK_PREFIX }}
+          stack_name=$(jq -r '.[] | select(.Name == "${{ inputs.StackName }}" and .EnableEc2Instance == false and .EnableEc2Volumes == false and .EnableNbVolume == false) | .Name' eventstore/$stack_prefix/clusters.json)
+          if [[ -n $stack_name && $stack_name == ${{ inputs.StackName }} ]]; then
+            echo "Volumes are false and the instances are not running for given stack"
           else
-            echo "Current es host value does not matches with account es host."
+            echo "error: Either volumes are true or instances are already in running state"
             exit 1
           fi
 
-      - name: Update mongo entry for mongo data migration
+      - name: Validate that AMI supports CPU architecture associated with instance type
         run: |
           set -euxo pipefail
-          source prod-venv/bin/activate
-          source_region=$(echo ${{ needs.setup-job-environment.outputs.SourceStackPrefix }} | cut -c 1-2)
-          destination_region=$(echo ${{ needs.setup-job-environment.outputs.DESTINATION_STACK_PREFIX }} | cut -c 1-2)
-          python3 ./scripts/eventstore/mongo-data-migration.py --mongo-primary-ip ${{ steps.get-primary-host-ip.outputs.SOURCE_PRIMARY_HOSTS }} --task 1 --account-ids ${{ inputs.AccountId }} --source-region $source_region --destination-region $destination_region --eventstore-host ${{ needs.fetch-necessary-cluster-ids.outputs.ES_CLUSTER_ID }} --redis-host ${{ needs.fetch-necessary-cluster-ids.outputs.REDIS_CLUSTER_ID }} --redis-host-lp ${{ needs.fetch-necessary-cluster-ids.outputs.REDIS_CLUSTER_ID }} --catalog-store-host ${{ needs.fetch-necessary-cluster-ids.outputs.CS_CLUSTER_ID }}  
+          instance_type_supported_arch=$(aws ec2 describe-instance-types --instance-types "${{ inputs.InstanceType || needs.setup-job-environment.outputs.INSTANCE_TYPE }}" --region ${{ needs.setup-job-environment.outputs.REGION }} --query 'InstanceTypes[0].ProcessorInfo.SupportedArchitectures' --output text)
+          ami_supported_arch=$(aws ec2 describe-images --image-ids "${{ inputs.AmiId || needs.setup-job-environment.outputs.AMI_ID }}" --region ${{ needs.setup-job-environment.outputs.REGION }} --query 'Images[0].Architecture' --output text)
+          if [[ "$instance_type_supported_arch" == *"$ami_supported_arch"* ]]; then
+            echo "${{ inputs.InstanceType || needs.setup-job-environment.outputs.INSTANCE_TYPE }} is compatible with AMI ID ${{ inputs.AmiId || needs.setup-job-environment.outputs.AMI_ID }}"
+          else
+            echo "${{ inputs.InstanceType || needs.setup-job-environment.outputs.INSTANCE_TYPE }} is not compatible with AMI ID ${{ inputs.AmiId || needs.setup-job-environment.outputs.AMI_ID }}"
+            exit 1
+          fi
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      - name: Start Regional Account Migration
+      - name: Validate that AMI is CleverTap generated and based on ECS optimized AMI
+        run: |
+          set -euxo pipefail
+          ami_name=$(aws ec2 describe-images --image-ids "${{ inputs.AmiId || needs.setup-job-environment.outputs.AMI_ID }}" --region ${{ needs.setup-job-environment.outputs.REGION }} --query 'Images[0].Name' --output text)
+          if [[ "$ami_name" == "wizrocket-amzn2-ami-ecs-hvm"* || "$ami_name" == "wizrocket-al2023-ami-ecs-hvm-2023"* ]]; then
+            echo "${{ inputs.AmiId || needs.setup-job-environment.outputs.AMI_ID }} is CleverTap generated and based on ECS optimized AMI"
+          else
+            echo "${{ inputs.AmiId || needs.setup-job-environment.outputs.AMI_ID }} is not CleverTap generated and based on ECS optimized AMI"
+            exit 1
+          fi
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  execute-start-instances:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-job-environment
+      - pre-flight-validation
+
+    steps:
+      - name: Checkout Infra-Actions repo
+        uses: actions/checkout@v3
+
+      - name: Start instances of ${{ inputs.StackName }}
+        uses: ./.github/actions/cloudformation-build-commit-and-deploy
+        with:
+            query: 'map(if .Name == "${{ inputs.StackName }}" then .EnableEc2Instance = true | .EnableEc2Volumes = true | .EnableNbVolume = true | .XvdnEc2VolumeSize = (if ${{ inputs.NbDiskSize }} == 0 then .XvdnEc2VolumeSize else ${{ inputs.NbDiskSize }} end) | .XvdpEc2VolumeSize = (if ${{ inputs.EsDiskSize }} == 0 then .XvdpEc2VolumeSize else ${{ inputs.EsDiskSize }} end) | .ImageId = "${{ inputs.AmiId || needs.setup-job-environment.outputs.AMI_ID }}" | .InstanceType = "${{ inputs.InstanceType || needs.setup-job-environment.outputs.INSTANCE_TYPE }}" | .InstanceCount = ${{ inputs.InstanceCount || needs.setup-job-environment.outputs.INSTANCE_COUNT }} else . end)'
+            issue_id: ${{ inputs.IssueId }}
+            stack_name: ${{ inputs.StackName }}
+            component: 'eventstore'
+            commit_message: 'eventstore: start instances of ${{ inputs.StackName }} with given attributes'
+            app_id: ${{ secrets.CLEVERTAP_SNE_BOT_ID }}
+            private_key: ${{ secrets.CLEVERTAP_SNE_BOT_PRIVATE_ACCESS_KEY }}
+            aws_cloudformation_service_iam_role: ${{ secrets.AWS_CLOUDFORMATION_SERVICE_IAM_ROLE }}
+            aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+            aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  post-flight-validation:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-job-environment
+      - pre-flight-validation
+      - execute-start-instances
+
+    steps:
+      - name: Checkout Infra-Actions repo
+        id: checkout-infra-actions-repo
+        uses: actions/checkout@v3
+
+      - name: Install Python Requirements
+        run: |
+          set -euxo pipefail
+          python3 -m venv prod-venv
+          source prod-venv/bin/activate
+          pip3 install requests argparse
+
+      - name: Validate that checks associated with instance are registered in Sensu
+        if: needs.setup-job-environment.outputs.IS_SENSU_AGENT_ENABLED == 'true'
         run: |
           set -euxo pipefail
           source prod-venv/bin/activate
-          python3 ./scripts/eventstore/mongo-data-migration.py --mongo-primary-ip ${{ steps.get-primary-host-ip.outputs.SOURCE_PRIMARY_HOSTS }} --task 3 --account-ids ${{ inputs.AccountId }}
+          python3 ./scripts/sensu/wait_until_sensu_checks_are_green.py --stack ${{ inputs.StackName }} --subscription eventstore --instance-count ${{ needs.setup-job-environment.outputs.INSTANCE_COUNT }} --start-ip ${{ needs.setup-job-environment.outputs.START_IP }} --checks keepalive,nb-availability,realtimeexports-availability,eventstore-availability,eventstore_health_v2
+        env:
+          SENSU_API_KEY: ${{ secrets.SENSU_API_KEY }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_ID: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_ID }}
+          SENSU_CLOUDFLARE_ACCESS_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_SERVICE_TOKEN_SECRET }}
+
+  execute-to-create-jira-ticket:
+    runs-on: ubuntu-latest
+    needs:
+      - setup-job-environment
+      - pre-flight-validation
+      - execute-start-instances
+      - post-flight-validation
+
+    steps:
+      - name: Generate github token
+        id: generate-github-token
+        uses: tibdex/github-app-token@v1.8.0
+        with:
+          app_id: ${{ secrets.CLEVERTAP_SNE_BOT_ID }}
+          private_key: ${{ secrets.CLEVERTAP_SNE_BOT_PRIVATE_ACCESS_KEY }}
+
+      - name: Checkout Infra-Actions repo
+        uses: actions/checkout@v3
+
+      - name: Install Python
+        run: |
+          python3 -m venv prod-venv
+          source prod-venv/bin/activate
+          pip3 install requests argparse
+
+      - name: Execute create-jira-ticket script
+        run: |
+          set -euxo pipefail
+          source prod-venv/bin/activate
+          python3 ./scripts/eventstore/create-jira-ticket.py --stack_name ${{ inputs.StackName }}
+        env:
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
