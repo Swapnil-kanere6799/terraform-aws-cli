@@ -1,35 +1,65 @@
-name: Test Retry Logic
+name: stackname/Add-StackName-To-WorkFlow
+
+run-name: stackname/Add-StackName-To-WorkFlow-${{ github.run_number }}
 
 on:
-  push:
+  pull_request:
+    types: [opened, synchronize, reopened]
     branches:
-      - main # Trigger on push to the main branch
-  workflow_dispatch: # Allows manual triggering
+      - '*'
+
+  workflow_dispatch:
+    inputs:
+      stackname:
+        description: "The StackName to add."
+        required: true
+        type: string
+      filename:
+        description: "The YAML filename to update."
+        required: true
+        type: string
 
 jobs:
-  test-retry:
+  update-options-of-stackname:
     runs-on: ubuntu-latest
-
-    env:
-      RETRY_COUNT: 0 # Initialize the retry count
-
     steps:
-      - name: Checkout Code
+      - name: Checkout terraform-aws-cli Repository
         uses: actions/checkout@v3
-
-      - name: Test Retry Logic
-        uses: nick-fields/retry@v3
         with:
-          timeout_minutes: 10
-          max_attempts: 5
-          shell: bash
-          command: |
-            echo "Current retry count: $RETRY_COUNT"
-            if [ "$RETRY_COUNT" -lt 5 ]; then
-              export RETRY_COUNT=$((RETRY_COUNT + 1))
-              echo "Retry count updated to $RETRY_COUNT"
-              exit 0
-            else
-              echo "Success on attempt $RETRY_COUNT"
-              exit 0
-            fi
+          ref: main
+
+      - name: Update YAML file
+        run: |
+          set -euxo pipefail
+          pip3 install yq
+          STACKNAME="in1-Es-Tesseract-Test"
+          FILENAME=".github/workflows/blank.yml"
+          
+          # Check if the file exists
+          if [ ! -f "$FILENAME" ]; then
+            echo "Error: File $FILENAME not found."
+            exit 1
+          fi
+          
+          # Update the YAML file using yq (only if stackname is not present)
+          yq -i -y '.on.workflow_dispatch.inputs.StackName.options |= 
+            (if (. | index("'"$STACKNAME"'")) == null then . + [ "'"$STACKNAME"'" ] | sort else . end)' "$FILENAME"  
+  
+          # Confirm changes
+          echo "Stack name '$STACKNAME' added and options sorted if applicable."
+          echo "Updated YAML content:"
+          cat "$FILENAME"
+
+      - name: Commit and push changes
+        run: |
+          set -euxo pipefail
+          FILENAME=".github/workflows/eventstore-start-test-instances.yml"
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          git add "$FILENAME"        
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Updated StackName options in $FILENAME"
+            git push origin master
+          fi
